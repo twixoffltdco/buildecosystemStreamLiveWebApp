@@ -17,8 +17,8 @@
     settings: (function(){
       try { return JSON.parse(localStorage.getItem('sl_settings') || '{}'); } catch(e){ return {}; }
     })(),
-    version: '1.4.4-F33',
-    build: 1475,
+    version: '1.4.4-F49',
+    build: 1491,
     devTap: 0,
 
     tab: 0,
@@ -105,31 +105,196 @@
     writeDataCache(key, merged);
     return merged;
   }
+  
+  /* ---------- Доступ: только РФ + СНГ (остальным — «отключите VPN») ---------- */
+  var CIS_COUNTRIES = {
+    RU:1, BY:1, KZ:1, KG:1, AM:1, AZ:1, MD:1, TJ:1, TM:1, UZ:1,
+    // часто относят к региону сервиса
+    UA:1, GE:1
+  };
+  var __regionOk = null; // null=unknown, true/false
+
+  function regionGateAllowed(code) {
+    code = String(code || '').toUpperCase();
+    return !!CIS_COUNTRIES[code];
+  }
+
+  async function detectCountryCode() {
+    // 1) наш PHP native_geo — по IP на сервере
+    try {
+      var r = await softFetchJson(
+        ['/webapp/api/native_geo.php', '/api/native_geo.php'],
+        'GET',
+        {}
+      );
+      if (r && r.country) {
+        try { localStorage.setItem('sl_geo_allowed', r.allowed ? '1' : '0'); } catch (e) {}
+        return String(r.country).toUpperCase();
+      }
+      // сервер ответил без country, но с allowed
+      if (r && r.ok && r.allowed === false) return 'XX';
+      if (r && r.ok && r.allowed === true) return 'RU';
+    } catch (e) {}
+    // 2) публичные geo из браузера
+    var endpoints = [
+      { url: 'https://ipapi.co/json/', pick: function(j){ return j && (j.country_code || j.country); } },
+      { url: 'https://ipwho.is/', pick: function(j){ return j && j.country_code; } },
+      { url: 'https://api.country.is/', pick: function(j){ return j && j.country; } }
+    ];
+    for (var i = 0; i < endpoints.length; i++) {
+      try {
+        var res = await fetch(endpoints[i].url, { method: 'GET', credentials: 'omit', cache: 'no-store' });
+        if (!res.ok) continue;
+        var j = await res.json();
+        var code = endpoints[i].pick(j);
+        if (code) return String(code).toUpperCase();
+      } catch (e) {}
+    }
+    try {
+      var c = localStorage.getItem('sl_geo_country');
+      if (c) return String(c).toUpperCase();
+    } catch (e) {}
+    return '';
+  }
+
+  function showRegionBlockScreen(country) {
+    state._regionBlocked = true;
+    var old = document.getElementById('sl-region-gate');
+    if (old) old.remove();
+    var gate = document.createElement('div');
+    gate.id = 'sl-region-gate';
+    gate.style.cssText = 'position:fixed;inset:0;z-index:2147483640;display:flex;align-items:center;justify-content:center;padding:20px;background:radial-gradient(ellipse at 50% 0%,#1a1440 0%,#070b18 55%,#050816 100%);font-family:system-ui,-apple-system,sans-serif;';
+    var card = document.createElement('div');
+    card.style.cssText = 'max-width:360px;width:100%;background:rgba(255,255,255,0.96);color:#12131a;border-radius:24px;padding:28px 22px 22px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.45);';
+    card.innerHTML =
+      '<div style="width:56px;height:56px;margin:0 auto 14px;border-radius:16px;background:linear-gradient(135deg,#efeaff,#fce7f3);display:flex;align-items:center;justify-content:center;position:relative">' +
+        '<span style="font-size:28px">🌐</span>' +
+        '<span style="position:absolute;right:-4px;top:-4px;width:22px;height:22px;border-radius:50%;background:#ef4444;color:#fff;font-size:14px;line-height:22px">×</span>' +
+      '</div>' +
+      '<h2 style="margin:0 0 8px;font-size:20px;font-weight:800;letter-spacing:-0.02em">Похоже, вы используете VPN</h2>' +
+      '<p style="margin:0 0 18px;font-size:14px;line-height:1.45;color:#5b6472">С ним зайти не получится.<br>Сервис доступен в <b>России и странах СНГ</b>.<br>Это требование регулятора.</p>' +
+      '<div style="text-align:left;margin:0 0 18px">' +
+        '<div style="font-size:13px;font-weight:700;margin-bottom:10px;color:#12131a">Вот что можно сделать:</div>' +
+        '<div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start">' +
+          '<span style="width:22px;height:22px;border-radius:50%;background:#22c55e;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0">✓</span>' +
+          '<div><b style="font-size:14px">Отключить VPN</b><div style="font-size:12px;color:#6b7280">Если он работает у вас на устройстве.</div></div>' +
+        '</div>' +
+        '<div style="display:flex;gap:10px;align-items:flex-start">' +
+          '<span style="width:22px;height:22px;border-radius:50%;background:#22c55e;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0">✓</span>' +
+          '<div><b style="font-size:14px">Выбрать другую сеть Wi‑Fi</b><div style="font-size:12px;color:#6b7280">Если VPN настроен на роутере.</div></div>' +
+        '</div>' +
+      '</div>' +
+      '<button type="button" id="sl-region-retry" style="width:100%;border:0;border-radius:999px;padding:14px 16px;background:#12131a;color:#fff;font-weight:700;font-size:15px;cursor:pointer">Попробовать ещё раз</button>' +
+      '<div style="margin-top:12px;font-size:11px;color:#9ca3af">Регион: ' + (country || 'не определён') + ' · StreamLive</div>';
+    gate.appendChild(card);
+    document.body.appendChild(gate);
+    document.getElementById('sl-region-retry').onclick = function() {
+      gate.remove();
+      state._regionBlocked = false;
+      __regionOk = null;
+      screenTimeStartWatcher();
+    runRegionGate().then(function(ok) {
+        if (ok) go('splash');
+      });
+    };
+  }
+
+  async function runRegionGate() {
+    // Гео НЕ должно ломать приложение. Блокируем только при явном "не СНГ".
+    try {
+      if (localStorage.getItem('sl_skip_region_gate') === '1') {
+        __regionOk = true;
+        return true;
+      }
+    } catch (e) {}
+    if (__regionOk === true) return true;
+
+    try {
+      var gr = await softFetchJson(
+        ['/webapp/api/native_geo.php', '/api/native_geo.php'],
+        'GET',
+        {}
+      );
+      if (gr && gr.ok) {
+        var codeG = String(gr.country || '').toUpperCase();
+        if (codeG) {
+          try { localStorage.setItem('sl_geo_country', codeG); } catch (e) {}
+        }
+        if (gr.allowed === true || (codeG && regionGateAllowed(codeG))) {
+          __regionOk = true;
+          return true;
+        }
+        if (codeG && !regionGateAllowed(codeG)) {
+          __regionOk = false;
+          showRegionBlockScreen(codeG);
+          return false;
+        }
+        // country пустой — пускаем (нет данных ≠ чужой регион)
+        __regionOk = true;
+        return true;
+      }
+    } catch (e) {}
+
+    // fallback browser geo — только если явно не СНГ, блокируем
+    try {
+      var code = await detectCountryCode();
+      if (code) {
+        try { localStorage.setItem('sl_geo_country', code); } catch (e) {}
+        if (regionGateAllowed(code)) {
+          __regionOk = true;
+          return true;
+        }
+        if (code && code !== 'XX' && code !== 'VPN' && !regionGateAllowed(code)) {
+          __regionOk = false;
+          showRegionBlockScreen(code);
+          return false;
+        }
+      }
+    } catch (e) {}
+
+    // по умолчанию — пускаем, чтобы WebApp не умирал
+    __regionOk = true;
+    return true;
+  }
+
+
+function hardRefreshToBuild(build) {
+    return (async function() {
+      try {
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          for (const reg of regs) {
+            try {
+              await reg.update();
+              if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+              await reg.unregister();
+            } catch (_) {}
+          }
+        }
+        if (window.caches) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map(function(k) { return caches.delete(k); }));
+        }
+      } catch (_) {}
+      location.replace('/webapp/?v=' + encodeURIComponent(String(build || state.build)) + '&sl_refresh=' + Date.now());
+    })();
+  }
+
+  /** Мягкий баннер (можно закрыть) */
   function showUpdateBanner(version, build) {
+    if (document.getElementById('sl-force-update')) return; // force уже на экране
     const key = 'sl_update_dismiss_' + String(build);
     try { if (sessionStorage.getItem(key) === '1') return; } catch (_) {}
     var old = document.getElementById('sl-update-banner');
     if (old) old.remove();
     const banner = el('div', { id: 'sl-update-banner', class: 'sl-update-banner' });
-    banner.innerHTML = '';
     const info = el('div', { class: 'sl-update-info' });
     info.innerHTML = '<b>Доступно обновление</b><small>Сейчас: ' + state.version + ' · ' + state.build + '<br>Новое: ' + String(version) + ' · build ' + String(build) + '</small>';
     const btn = el('button', { type: 'button', class: 'sl-update-btn' }, 'Обновить');
-    btn.onclick = async () => {
-      btn.disabled = true; btn.textContent = '…';
-      try {
-        if ('serviceWorker' in navigator) {
-          const regs = await navigator.serviceWorker.getRegistrations();
-          for (const reg of regs) {
-            try { await reg.update(); if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' }); } catch (_) {}
-          }
-        }
-        if (window.caches) {
-          const keys = await caches.keys();
-          await Promise.all(keys.map(k => caches.delete(k)));
-        }
-      } catch (_) {}
-      location.replace('/webapp/?v=' + encodeURIComponent(String(build)) + '&sl_refresh=' + Date.now());
+    btn.onclick = function() {
+      btn.disabled = true;
+      btn.textContent = '…';
+      hardRefreshToBuild(build);
     };
     const x = el('button', { type: 'button', class: 'sl-update-x', title: 'Скрыть' }, '×');
     x.onclick = function() {
@@ -138,6 +303,54 @@
     };
     banner.append(info, btn, x);
     document.body.appendChild(banner);
+  }
+
+  /** Жёсткий full-screen: старые версии нельзя пользоваться */
+  function showForceUpdateGate(info) {
+    if (document.getElementById('sl-force-update')) return;
+    state._forceUpdate = true;
+    var ver = String((info && info.version) || 'актуальную');
+    var build = Number((info && info.build) || 0);
+    var msg = String((info && (info.force_message || info.message)) ||
+      'Эта версия WebApp устарела и отключена. Обновитесь, чтобы продолжить.');
+    var gate = el('div', { id: 'sl-force-update' });
+    gate.style.cssText = 'position:fixed;inset:0;z-index:2147483000;background:rgba(5,8,20,.96);display:flex;align-items:center;justify-content:center;padding:20px;';
+    var card = el('div', { class: 'card' });
+    card.style.cssText = 'max-width:420px;width:100%;padding:22px;text-align:center';
+    card.innerHTML =
+      '<div style="font-size:40px;margin-bottom:8px">⛔</div>' +
+      '<h2 style="margin:0 0 10px">Требуется обновление</h2>' +
+      '<p style="opacity:.85;line-height:1.45;margin:0 0 12px"></p>' +
+      '<p style="font-size:13px;opacity:.65;margin:0 0 16px"></p>';
+    card.querySelectorAll('p')[0].textContent = msg;
+    card.querySelectorAll('p')[1].textContent =
+      'У вас: ' + state.version + ' (build ' + state.build + ') · Нужна: ' + ver + ' (build ' + build + ')';
+    var btn = el('button', { type: 'button', class: 'btn primary', style: 'width:100%' }, 'Обновить сейчас');
+    btn.onclick = function() {
+      btn.disabled = true;
+      btn.textContent = 'Обновление…';
+      hardRefreshToBuild(build || state.build);
+    };
+    card.appendChild(btn);
+    gate.appendChild(card);
+    document.body.appendChild(gate);
+    // блокируем навигацию приложения
+    try {
+      var app = document.getElementById('app');
+      if (app) app.setAttribute('aria-hidden', 'true');
+    } catch (e) {}
+  }
+
+  function isBuildBlocked(localBuild, info) {
+    if (!info) return false;
+    var remote = Number(info.build) || 0;
+    var minBuild = Number(info.min_build != null ? info.min_build : info.force_min_build) || 0;
+    var force = info.force_update === true || info.force_update === 1 || info.force_update === '1';
+    // если задан min_build — всё ниже блокируется
+    if (minBuild > 0 && localBuild < minBuild) return true;
+    // force_update + remote новее
+    if (force && remote > localBuild) return true;
+    return false;
   }
 
 
@@ -685,6 +898,34 @@
           try { var op = new OpenPlayerJS(videoEl); op.init(); videoEl._openplayer = op; } catch (e) {}
           return videoEl.play().catch(function(){});
         });
+      
+      } else if (mode === 'mpegts') {
+        task = loadPlayerScript('mpegts', 'https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js').then(function(mpegts) {
+          if (!mpegts || !mpegts.getFeatureList().mseLivePlayback) {
+            videoEl.src = url;
+            return videoEl.play().catch(function(){});
+          }
+          var player = mpegts.createPlayer({ type: 'mse', isLive: true, url: url });
+          player.attachMediaElement(videoEl);
+          player.load();
+          videoEl._mpegts = player;
+          return player.play().catch(function(){});
+        });
+      } else if (mode === 'hls_modern') {
+        task = loadPlayerScript('Hls', 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js').then(function(Hls) {
+          if (Hls.isSupported()) {
+            var hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+            hls.loadSource(url);
+            hls.attachMedia(videoEl);
+            videoEl._hls = hls;
+            return new Promise(function(resolve) {
+              hls.on(Hls.Events.MANIFEST_PARSED, function() { videoEl.play().then(resolve).catch(resolve); });
+            });
+          }
+          videoEl.src = url;
+          return videoEl.play().catch(function(){});
+        });
+
       } else if (mode === 'cdnplayer' || mode === 'liveplayer') {
         task = Promise.resolve((function(){
           var host = videoEl.parentElement || videoEl;
@@ -1316,7 +1557,21 @@ function getSetting(k, def) {
   async function ensureAccountGates(user) {
     if (!user) return true;
     if (user.need_2fa_setup) {
-      toast('На сайте обязательна 2FA. Настройте её в профиле на сайте, затем перезайдите.');
+      // не долбим если уже показывали в этой сессии
+      try {
+        if (sessionStorage.getItem('sl_2fa_nag') === '1') {
+          /* skip repeat */
+        } else {
+          sessionStorage.setItem('sl_2fa_nag', '1');
+          toast('Подключите 2FA в профиле на сайте — так безопаснее. Если уже есть — просто перезайдите.');
+        }
+      } catch (e) {
+        toast('Рекомендуем включить 2FA в профиле на сайте');
+      }
+    }
+    // если 2FA уже есть — не трогаем
+    if (user.totp_enabled === true) {
+      try { sessionStorage.removeItem('sl_2fa_nag'); } catch (e) {}
     }
 
     var key = phoneGateKey(user);
@@ -1393,11 +1648,11 @@ function getSetting(k, def) {
   
   /* ---------- Моя коллекция (избранное) ---------- */
   function collectionLoad() {
-    try { return JSON.parse(localStorage.getItem('sl_collection_v1') || '{"channels":[],"videos":[]}'); }
+    try { return JSON.parse((typeof collectionStorageKey==='function'?localStorage.getItem(collectionStorageKey()):null)||localStorage.getItem('sl_collection_v1') || '{"channels":[],"videos":[]}'); }
     catch (e) { return { channels: [], videos: [] }; }
   }
   function collectionSave(data) {
-    try { localStorage.setItem('sl_collection_v1', JSON.stringify(data)); } catch (e) {}
+    try { localStorage.setItem((typeof collectionStorageKey==='function'?collectionStorageKey():'sl_collection_v1'), JSON.stringify(data)); } catch (e) {}
   }
   function collectionHas(type, id) {
     var d = collectionLoad();
@@ -1972,84 +2227,167 @@ function getSetting(k, def) {
 
   function screenEpg(root) {
     shell(root, 'Телепрограмма', async function(c) {
-      c.appendChild(el('p', { style: 'color:var(--muted);font-size:13px;margin:0 0 12px' },
-        'Расписание из EPG сайта (api/epg_live). Без данных — честно «нет программы».'));
+      c.appendChild(el('p', { style: 'color:var(--muted);font-size:13px;margin:0 0 10px' },
+        'Поиск по каналам и программе. Данные — native_epg / epg_live.'));
+
+      var searchRow = el('div', { class: 'search-glass', style: 'margin-bottom:12px' });
+      var inp = el('input', {
+        type: 'search',
+        placeholder: 'Канал или передача…',
+        style: 'flex:1;min-width:0'
+      });
+      var sbtn = el('button', { type: 'button', class: 'chip' }, 'Найти');
+      searchRow.append(inp, sbtn);
+      c.appendChild(searchRow);
 
       var listBox = el('div', { class: 'list' });
       c.appendChild(listBox);
       listBox.appendChild(el('div', { class: 'loading' }, 'Загрузка каналов…'));
 
-      var channels = state.channels || [];
+      var allChannels = state.channels || [];
       try {
-        if (!channels.length) {
-          var cr = await api('GET', '/api/native_home.php', { query: { type: 'channels', limit: '30' } });
-          channels = (cr && (cr.channels || cr.data)) || [];
-          state.channels = channels;
-          if (channels && channels.length) offlineCacheSet('channels', channels);
-          if (profileIsKids()) channels = filterKidsContent(channels, 'channel');
+        if (!allChannels.length) {
+          var cr = await api('GET', '/api/native_home.php', { query: { type: 'channels', limit: '120' } });
+          allChannels = (cr && (cr.channels || cr.data)) || [];
+          state.channels = allChannels;
+          if (allChannels && allChannels.length) offlineCacheSet('channels', allChannels);
         }
+        if (profileIsKids()) allChannels = filterKidsContent(allChannels.slice(), 'channel');
       } catch (e) {}
 
-      listBox.innerHTML = '';
-      if (!channels.length) {
-        listBox.appendChild(el('div', { class: 'empty' }, 'Нет каналов'));
-        return;
+      // кэш программ по slug
+      var epgCache = {};
+
+      function chMatch(ch, q) {
+        if (!q) return true;
+        q = q.toLowerCase();
+        var blob = [
+          ch.title, ch.name, ch.slug, ch.id, ch.epg_id, ch.category, ch.genre
+        ].filter(Boolean).join(' ').toLowerCase();
+        return blob.indexOf(q) >= 0;
       }
 
-      // show channels; load EPG on expand
-      channels.slice(0, 25).forEach(function(ch) {
-        var row = el('div', { class: 'row', style: 'flex-direction:column;align-items:stretch;cursor:pointer' });
-        var top = el('div', { style: 'display:flex;justify-content:space-between;gap:8px;width:100%' });
-        var tx = el('div', { class: 'tx' });
-        tx.appendChild(el('b', null, ch.title || ch.name || ch.slug || 'Канал'));
-        tx.appendChild(el('small', null, 'нажми — программа'));
-        var goCh = el('button', { type: 'button', class: 'chip' }, 'Эфир');
-        goCh.onclick = function(ev) {
-          ev.stopPropagation();
-          go('channel', { slug: ch.slug || ch.id });
-        };
-        top.append(tx, goCh);
-        var epgBox = el('div', { style: 'display:none;margin-top:8px;font-size:13px;color:var(--muted)' });
-        row.append(top, epgBox);
-        var loaded = false;
-        row.onclick = async function() {
-          if (epgBox.style.display === 'block') {
-            epgBox.style.display = 'none';
-            return;
+      async function renderList(q) {
+        q = String(q || '').trim();
+        listBox.innerHTML = '';
+        var channels = (allChannels || []).filter(function(ch) { return chMatch(ch, q); });
+
+        // если ищем — подтянем EPG у первых каналов и фильтруем по названию передач
+        if (q && channels.length) {
+          var matched = [];
+          var pool = channels.slice(0, 40);
+          for (var i = 0; i < pool.length; i++) {
+            var ch = pool[i];
+            if (chMatch(ch, q)) {
+              matched.push({ ch: ch, hits: null });
+              continue;
+            }
           }
-          epgBox.style.display = 'block';
-          if (loaded) return;
-          epgBox.textContent = 'Загрузка EPG…';
-          var data = await fetchEpgForChannel(ch);
-          loaded = true;
-          if (!data) {
-            epgBox.textContent = 'Нет данных программы для этого канала';
-            return;
-          }
-          var items = data.items || data.programmes || data.programs || [];
-          var now = data.now || data.current || null;
-          var html = '';
-          if (now) {
-            html += '<div style="margin-bottom:6px;color:var(--text)"><b>Сейчас:</b> ' +
-              (now.title || now.name || now.programme || JSON.stringify(now)) + '</div>';
-          }
-          if (data.title && !items.length && !now) {
-            html += '<div>' + data.title + '</div>';
-          }
-          if (items.length) {
-            items.slice(0, 12).forEach(function(it) {
-              var title = it.title || it.name || it.programme || 'Передача';
-              var t0 = it.start || it.time || it.begin || '';
-              var t1 = it.stop || it.end || '';
-              html += '<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06)">' +
-                (t0 ? '<small>' + t0 + (t1 ? '–' + t1 : '') + '</small> ' : '') + title + '</div>';
+          // также поиск по уже загруженному EPG
+          channels.forEach(function(ch) {
+            var key = String(ch.slug || ch.id || '');
+            var data = epgCache[key];
+            if (!data) return;
+            var items = data.items || data.programs || data.epg || [];
+            if (!Array.isArray(items)) return;
+            var hits = items.filter(function(it) {
+              var t2 = String(it.title || it.name || it.programme || '').toLowerCase();
+              return t2.indexOf(q.toLowerCase()) >= 0;
             });
+            if (hits.length) matched.push({ ch: ch, hits: hits });
+          });
+          // unique by slug
+          var seen = {};
+          channels = [];
+          matched.forEach(function(m) {
+            var id = String(m.ch.slug || m.ch.id || '');
+            if (seen[id]) return;
+            seen[id] = 1;
+            channels.push(m.ch);
+          });
+          if (!channels.length) {
+            channels = (allChannels || []).filter(function(ch) { return chMatch(ch, q); });
           }
-          if (!html) html = (data.error || 'Нет данных программы');
-          epgBox.innerHTML = html;
-        };
-        listBox.appendChild(row);
+        }
+
+        if (!channels.length) {
+          listBox.appendChild(el('div', { class: 'empty' }, q ? 'Ничего не найдено по запросу' : 'Нет каналов'));
+          return;
+        }
+
+        channels.slice(0, 50).forEach(function(ch) {
+          var row = el('div', { class: 'row', style: 'flex-direction:column;align-items:stretch;cursor:pointer' });
+          var top = el('div', { style: 'display:flex;justify-content:space-between;gap:8px;width:100%' });
+          var tx = el('div', { class: 'tx' });
+          tx.appendChild(el('b', null, ch.title || ch.name || ch.slug || 'Канал'));
+          tx.appendChild(el('small', null, q ? 'совпадение · нажми для программы' : 'нажми — программа'));
+          var goCh = el('button', { type: 'button', class: 'chip' }, 'Эфир');
+          goCh.onclick = function(ev) {
+            ev.stopPropagation();
+            go('channel', { slug: ch.slug || ch.id });
+          };
+          top.append(tx, goCh);
+          var epgBox = el('div', { style: 'display:none;margin-top:8px;font-size:13px;color:var(--muted)' });
+          row.append(top, epgBox);
+          var key = String(ch.slug || ch.id || '');
+          var loaded = !!epgCache[key];
+          row.onclick = async function() {
+            if (epgBox.style.display === 'block' && !q) {
+              epgBox.style.display = 'none';
+              return;
+            }
+            epgBox.style.display = 'block';
+            if (!loaded) {
+              epgBox.textContent = 'Загрузка EPG…';
+              var data = await fetchEpgForChannel(ch);
+              loaded = true;
+              epgCache[key] = data || { items: [] };
+            }
+            var data = epgCache[key];
+            if (!data) {
+              epgBox.textContent = 'Нет данных программы для этого канала';
+              return;
+            }
+            var items = data.items || data.programs || data.epg || data.list || [];
+            if (!Array.isArray(items)) items = [];
+            if (q) {
+              var qq = q.toLowerCase();
+              var filtered = items.filter(function(it) {
+                var t2 = String(it.title || it.name || it.programme || '').toLowerCase();
+                return t2.indexOf(qq) >= 0;
+              });
+              if (filtered.length) items = filtered;
+            }
+            if (!items.length) {
+              epgBox.textContent = 'Нет данных программы для этого канала';
+              return;
+            }
+            var html = items.slice(0, 40).map(function(it) {
+              var title = it.title || it.name || it.programme || 'Передача';
+              var time = it.time || it.start || it.begin || it.start_time || '';
+              var stop = it.stop || it.end || it.end_time || '';
+              var line = (time ? time + (stop ? '–' + stop : '') + ' · ' : '') + title;
+              return '<div style="padding:4px 0;border-bottom:1px solid rgba(127,127,127,.12)">' + line + '</div>';
+            }).join('');
+            epgBox.innerHTML = html;
+          };
+          // при активном поиске сразу раскрыть
+          if (q) {
+            setTimeout(function() { row.click(); }, 0);
+          }
+          listBox.appendChild(row);
+        });
+      }
+
+      sbtn.onclick = function() { renderList(inp.value); };
+      inp.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter') { ev.preventDefault(); renderList(inp.value); }
       });
+      inp.addEventListener('input', function() {
+        // живой фильтр по каналам без лишних запросов
+        renderList(inp.value);
+      });
+      await renderList('');
     }, { back: function() { go('home'); } });
   }
 
@@ -2312,368 +2650,900 @@ function getSetting(k, def) {
     return bar;
   }
 
-/* ---------- Семейные профили + Streamy Kids + родительский контроль ---------- */
-  function profilesLoad() {
+/* ---------- Семейные профили (prod-like) + Виртуальный паспорт Мира ---------- */
+  var SL_FAMILY_KEY = 'sl_family_v2';
+
+  function familyLoad() {
     try {
-      var d = JSON.parse(localStorage.getItem('sl_profiles_v1') || 'null');
-      if (d && Array.isArray(d.list) && d.list.length) {
-        // миграция: blocks на каждом профиле
-        d.list.forEach(function(p) {
-          if (!p.blocks) {
-            p.blocks = { categories: [], keywords: [], channelSlugs: [], videoSlugs: [], maxAge: 0 };
-          }
+      var d = JSON.parse(localStorage.getItem(SL_FAMILY_KEY) || 'null');
+      if (d && Array.isArray(d.profiles) && d.profiles.length) {
+        d.profiles.forEach(function(pr) {
+          if (!pr.data) pr.data = { continueWatch: [], collection: { channels: [], videos: [] }, settings: {} };
+          if (!pr.data.collection) pr.data.collection = { channels: [], videos: [] };
+          if (!pr.color) pr.color = pr.kids ? '#f59e0b' : '#7c4dff';
         });
-        if (d.parentPin == null) d.parentPin = '';
+        if (!d.activeId || !d.profiles.some(function(x){ return x.id === d.activeId; })) {
+          d.activeId = d.profiles[0].id;
+        }
+        if (!d.pin) d.pin = '';
         return d;
       }
     } catch (e) {}
+    // migrate v1
+    try {
+      var old = JSON.parse(localStorage.getItem('sl_profiles_v1') || 'null');
+      if (old && Array.isArray(old.list) && old.list.length) {
+        var migrated = {
+          pin: old.parentPin || '',
+          activeId: old.activeId || old.list[0].id,
+          profiles: old.list.map(function(pr) {
+            return {
+              id: pr.id,
+              name: pr.name || 'Профиль',
+              avatar: pr.avatar || (pr.kids ? '🧒' : '👤'),
+              kids: !!pr.kids,
+              color: pr.kids ? '#f59e0b' : '#7c4dff',
+              blocks: pr.blocks || { categories: [], keywords: [], channelSlugs: [], videoSlugs: [], maxAge: 0 },
+              data: { continueWatch: [], collection: { channels: [], videos: [] }, settings: {} }
+            };
+          })
+        };
+        localStorage.setItem(SL_FAMILY_KEY, JSON.stringify(migrated));
+        return migrated;
+      }
+    } catch (e) {}
     var base = {
-      list: [
-        { id: 'main', name: 'Основной', avatar: '👤', kids: false, blocks: { categories: [], keywords: [], channelSlugs: [], videoSlugs: [], maxAge: 0 } },
-      ],
+      pin: '',
       activeId: 'main',
-      parentPin: ''
+      profiles: [{
+        id: 'main',
+        name: 'Основной',
+        avatar: '👤',
+        kids: false,
+        color: '#7c4dff',
+        blocks: { categories: [], keywords: [], channelSlugs: [], videoSlugs: [], maxAge: 0 },
+        data: { continueWatch: [], collection: { channels: [], videos: [] }, settings: {} }
+      }]
     };
-    try { localStorage.setItem('sl_profiles_v1', JSON.stringify(base)); } catch (e) {}
+    try { localStorage.setItem(SL_FAMILY_KEY, JSON.stringify(base)); } catch (e) {}
     return base;
   }
-  function profilesSave(d) {
-    try { localStorage.setItem('sl_profiles_v1', JSON.stringify(d)); } catch (e) {}
+  function familySave(d) {
+    try { localStorage.setItem(SL_FAMILY_KEY, JSON.stringify(d)); } catch (e) { toast('Не удалось сохранить'); }
+  }
+  // совместимость со старыми именами
+  function profilesLoad() {
+    var d = familyLoad();
+    return { list: d.profiles, activeId: d.activeId, parentPin: d.pin };
+  }
+  function profilesSave(wrapper) {
+    var d = familyLoad();
+    if (wrapper.list) d.profiles = wrapper.list;
+    if (wrapper.activeId) d.activeId = wrapper.activeId;
+    if (wrapper.parentPin != null) d.pin = wrapper.parentPin;
+    familySave(d);
   }
   function profileActive() {
-    var d = profilesLoad();
-    return d.list.find(function(p) { return p.id === d.activeId; }) || d.list[0];
+    var d = familyLoad();
+    return d.profiles.find(function(p){ return p.id === d.activeId; }) || d.profiles[0];
   }
   function profileIsKids() {
     var p = profileActive();
     return !!(p && p.kids);
   }
-  function profileAskPin(reason) {
-    var d = profilesLoad();
-    if (!d.parentPin) {
-      toast('Сначала задайте PIN родителя');
-      return false;
-    }
-    var pin = prompt((reason || 'Родительский PIN') + '');
-    return pin === d.parentPin;
+  function familyPinOk(reason) {
+    var d = familyLoad();
+    if (!d.pin) return true;
+    var pin = prompt(reason || 'PIN семьи');
+    if (pin == null) return false;
+    return String(pin) === String(d.pin);
   }
-  function profileRequirePinOrSet() {
-    var d = profilesLoad();
-    if (!d.parentPin) {
-      var n = prompt('Придумайте PIN родителя (4+ символа)', '');
-      if (!n || String(n).trim().length < 4) {
-        toast('PIN слишком короткий');
-        return false;
-      }
-      d.parentPin = String(n).trim();
-      profilesSave(d);
-      toast('PIN сохранён');
-      return true;
-    }
-    return profileAskPin('Введите PIN родителя');
+  function familyEnsurePin() {
+    var d = familyLoad();
+    if (d.pin) return familyPinOk('Введите PIN семьи');
+    var n = prompt('Создайте PIN семьи (4+ символа)\nЗащищает Kids и ограничения', '');
+    if (n == null) return false;
+    n = String(n).trim();
+    if (n.length < 4) { toast('Минимум 4 символа'); return false; }
+    d.pin = n;
+    familySave(d);
+    toast('PIN семьи сохранён');
+    return true;
   }
   function profileSwitch(id) {
-    var d = profilesLoad();
-    var next = d.list.find(function(p) { return p.id === id; });
-    if (!next) return;
+    var d = familyLoad();
+    var next = d.profiles.find(function(p){ return String(p.id) === String(id); });
+    if (!next) { toast('Профиль не найден'); return; }
     var cur = profileActive();
     if (cur && cur.kids && !next.kids) {
-      if (!profileAskPin('PIN родителя для выхода из детского профиля')) {
-        toast('Неверный PIN');
-        return;
-      }
+      if (!familyPinOk('PIN для выхода из детского профиля')) { toast('Неверный PIN'); return; }
     }
-    d.activeId = id;
-    profilesSave(d);
-    toast('Профиль: ' + next.name);
-    go('home');
+    d.activeId = next.id;
+    familySave(d);
+    try {
+      if (next.kids) document.documentElement.setAttribute('data-kids', '1');
+      else document.documentElement.removeAttribute('data-kids');
+    } catch (e) {}
+    toast((next.avatar || '') + ' ' + next.name);
+    go(next.kids ? 'kids' : 'home');
   }
-
   function profileItemBlocked(item, type) {
-    var p = profileActive();
-    if (!p) return false;
-    var blocks = p.blocks || {};
+    var pr = profileActive();
+    if (!pr) return false;
+    var blocks = pr.blocks || {};
     var title = String(item.title || item.name || '').toLowerCase();
     var slug = String(item.slug || item.id || '').toLowerCase();
-    var cat = String(item.category || item.genre || item.type || item.section || '').toLowerCase();
-    var tags = String(item.tags || item.keywords || '').toLowerCase();
-    var blob = title + ' ' + cat + ' ' + tags;
-
-    // kids-профиль: скрываем взрослый контент по маркерам
-    if (p.kids) {
-      if (item.is_adult === true || item.adult === true || item.nsfw === true) return true;
-      if (/18\+|adult|эрот|porn|xxx|жестк/.test(blob)) return true;
-    }
-
+    var blob = (title + ' ' + String(item.category || '') + ' ' + String(item.genre || '')).toLowerCase();
+    if (pr.kids && /18\+|adult|эрот|xxx|porn/.test(blob)) return true;
     var kws = blocks.keywords || [];
     for (var i = 0; i < kws.length; i++) {
-      var k = String(kws[i] || '').toLowerCase().trim();
+      var k = String(kws[i]||'').toLowerCase().trim();
       if (k && blob.indexOf(k) >= 0) return true;
     }
     var cats = blocks.categories || [];
     for (var j = 0; j < cats.length; j++) {
-      var c = String(cats[j] || '').toLowerCase().trim();
-      if (c && (cat.indexOf(c) >= 0 || blob.indexOf(c) >= 0)) return true;
+      var c = String(cats[j]||'').toLowerCase().trim();
+      if (c && blob.indexOf(c) >= 0) return true;
     }
-    if (type === 'channel' || item.type === 'channel') {
-      var ch = blocks.channelSlugs || [];
-      if (ch.map(String).map(function(x){return x.toLowerCase();}).indexOf(slug) >= 0) return true;
-    }
-    if (type === 'video' || item.type === 'video') {
-      var vs = blocks.videoSlugs || [];
-      if (vs.map(String).map(function(x){return x.toLowerCase();}).indexOf(slug) >= 0) return true;
-    }
-    // maxAge: если у контента age_rating числом
-    var maxAge = parseInt(blocks.maxAge, 10) || 0;
-    if (maxAge > 0) {
-      var ar = parseInt(item.age_rating || item.min_age || item.age || 0, 10) || 0;
-      if (ar > maxAge) return true;
-      if (maxAge <= 12 && /18\+|16\+/.test(blob)) return true;
-      if (maxAge <= 6 && /12\+|16\+|18\+/.test(blob)) return true;
-    }
+    if (type === 'channel' && (blocks.channelSlugs||[]).map(String).map(function(x){return x.toLowerCase();}).indexOf(slug)>=0) return true;
+    if (type === 'video' && (blocks.videoSlugs||[]).map(String).map(function(x){return x.toLowerCase();}).indexOf(slug)>=0) return true;
+    var maxAge = parseInt(blocks.maxAge,10)||0;
+    if (maxAge > 0 && maxAge <= 12 && /16\+|18\+/.test(blob)) return true;
     return false;
   }
+  function isOnModeration(item) {
+    if (!item || typeof item !== 'object') return false;
+    var st = String(item.status || item.moderation || item.moderation_status || item.state || '').toLowerCase();
+    if (/moderat|pending|review|ожид|на\s*модерац|на_модерац|hidden|draft|queue|hold/.test(st)) return true;
+    if (item.is_moderated === true || item.on_moderation === true || item.pending === true) return true;
+    if (item.approved === false || item.is_approved === false) return true;
+    if (item.published === false || item.is_published === false) return true;
+    if (item.visible === false || item.is_visible === false) return true;
+    // numeric status used on some PHP: 0=pending
+    if (item.status === 0 || item.status === '0') return true;
+    return false;
+  }
+  function filterPublicContent(list) {
+    if (!Array.isArray(list)) return [];
+    return list.filter(function(it) { return !isOnModeration(it); });
+  }
+  function kidsScore(item) {
+    if (!item || typeof item !== 'object') return -999;
+    var blob = [
+      item.title, item.name, item.category, item.genre, item.type, item.section,
+      item.tags, item.age_rating, item.description, item.slug, item.group_title,
+      item.collection, item.folder
+    ].filter(Boolean).join(' ').toLowerCase();
 
+    // явный adult — сразу в минус
+    if (item.is_adult === true || item.adult === true || item.nsfw === true) return -1000;
+    if (/16\+|18\+|adult|эрот|horror|ужас|боевик|nsfw|xxx|porn|эротик|18plus|насилие|стрип/.test(blob)) return -1000;
+
+    var score = 0;
+    // явные флаги детского
+    if (item.is_kids === true || item.kids === true || item.child === true || item.for_kids === true) score += 80;
+    if (item.age_rating === '0+' || item.age_rating === '6+' || item.min_age === 0 || item.min_age === 6) score += 40;
+
+    // сильные детские маркеры
+    if (/\b(детск|для детей|kids|children|child|cartoon|мульт|анимац|сказк|школьн|учись|обуча|ясель|дошкол|0\+|6\+|youtube kids|streamy kids)\b/.test(blob)) score += 50;
+    if (/\b(peppa|щенячий|paw patrol|masha|маша и медвед|фикс[иы]|smeshar|смешар|лунтик|барбос|ми-ми-миш|мимимиш|princess|disney junior)\b/.test(blob)) score += 40;
+
+    // слабые — сами по себе НЕ пускают во взрослом каталоге
+    if (/\b(family|семей|comedy|комеди|music|музыка)\b/.test(blob)) score += 5;
+
+    return score;
+  }
+  function isExplicitKidsItem(item) {
+    // Только явное детское. Без «похоже на безопасно».
+    return kidsScore(item) >= 40;
+  }
   function filterKidsContent(list, type) {
     if (!Array.isArray(list)) return [];
-    var p = profileActive();
-    var out = list.filter(function(it) {
+    var pr = profileActive();
+    var base = list.filter(function(it) {
+      if (isOnModeration(it)) return false;
       if (profileItemBlocked(it, type)) return false;
-      if (p && p.kids) {
-        // в kids показываем только с детскими маркерами ИЛИ без взрослых маркеров если список уже узкий
-        if (it.is_kids === true || it.kids === true || it.child === true) return true;
-        var cat = String(it.category || it.genre || it.type || '').toLowerCase();
-        var title = String(it.title || it.name || '').toLowerCase();
-        if (/дет|kids|child|cartoon|мульт|0\+|6\+/.test(cat + ' ' + title)) return true;
-        // если явных маркеров нет — всё равно пропускаем только если нет 16+/18+
-        if (/16\+|18\+|adult|эрот/.test(cat + ' ' + title)) return false;
-        // строгий kids: без маркера скрываем (безопаснее)
-        return false;
-      }
       return true;
     });
-    return out;
+    if (!(pr && pr.kids)) return base;
+
+    // СТРОГО: только детское
+    var kidsOnly = base.filter(isExplicitKidsItem);
+    // сортировка: самый «детский» сверху
+    kidsOnly.sort(function(a, b) { return kidsScore(b) - kidsScore(a); });
+    return kidsOnly;
+  }
+
+  /* ----- Экранное время (Kids) ----- */
+  function screenTimeLoad(profileId) {
+    var day = new Date().toISOString().slice(0, 10);
+    var key = 'sl_screentime_v1:' + (profileId || 'main');
+    try {
+      var j = JSON.parse(localStorage.getItem(key) || 'null');
+      if (!j || j.day !== day) return { day: day, usedSec: 0, limitMin: 0 };
+      return j;
+    } catch (e) { return { day: day, usedSec: 0, limitMin: 0 }; }
+  }
+  function screenTimeSave(profileId, data) {
+    try { localStorage.setItem('sl_screentime_v1:' + (profileId || 'main'), JSON.stringify(data)); } catch (e) {}
+  }
+  function screenTimeLimitMin(pr) {
+    if (!pr) return 0;
+    var fromProfile = parseInt(pr.screenLimitMin, 10) || 0;
+    if (fromProfile > 0) return fromProfile;
+    var blocks = pr.blocks || {};
+    return parseInt(blocks.screenLimitMin, 10) || 0;
+  }
+  function screenTimeTick() {
+    try {
+      if (!profileIsKids()) return;
+      var pr = profileActive();
+      if (!pr) return;
+      var lim = screenTimeLimitMin(pr);
+      if (lim <= 0) return;
+      var st = screenTimeLoad(pr.id);
+      st.usedSec = (st.usedSec || 0) + 30;
+      st.limitMin = lim;
+      screenTimeSave(pr.id, st);
+      if (st.usedSec >= lim * 60) {
+        showScreenTimeLock(pr, st);
+      }
+    } catch (e) {}
+  }
+  var __screenTimeTimer = null;
+  function screenTimeStartWatcher() {
+    if (__screenTimeTimer) return;
+    __screenTimeTimer = setInterval(screenTimeTick, 30000);
+    // immediate check
+    setTimeout(function() {
+      try {
+        if (!profileIsKids()) return;
+        var pr = profileActive();
+        var lim = screenTimeLimitMin(pr);
+        if (lim <= 0) return;
+        var st = screenTimeLoad(pr.id);
+        if ((st.usedSec || 0) >= lim * 60) showScreenTimeLock(pr, st);
+      } catch (e) {}
+    }, 500);
+  }
+  function showScreenTimeLock(pr, st) {
+    if (document.getElementById('sl-screentime-lock')) return;
+    state._screenTimeLocked = true;
+    var gate = document.createElement('div');
+    gate.id = 'sl-screentime-lock';
+    gate.style.cssText = 'position:fixed;inset:0;z-index:2147483600;background:rgba(5,8,20,.96);display:flex;align-items:center;justify-content:center;padding:20px;';
+    var card = document.createElement('div');
+    card.className = 'card';
+    card.style.cssText = 'max-width:400px;width:100%;padding:22px;text-align:center';
+    var usedMin = Math.floor((st.usedSec || 0) / 60);
+    card.innerHTML =
+      '<div style="font-size:40px;margin-bottom:8px">⏰</div>' +
+      '<h2 style="margin:0 0 8px">Время вышло</h2>' +
+      '<p style="opacity:.85;line-height:1.45;margin:0 0 12px">Родительский лимит для профиля «' + (pr.name || 'Kids') + '»: ' +
+      (st.limitMin || screenTimeLimitMin(pr)) + ' мин. Сегодня уже ' + usedMin + ' мин.</p>' +
+      '<p style="font-size:13px;opacity:.7;margin:0 0 16px">Можно отложить телефон и вернуться завтра — или родитель введёт PIN.</p>';
+    var pinBtn = document.createElement('button');
+    pinBtn.type = 'button';
+    pinBtn.className = 'btn primary';
+    pinBtn.style.width = '100%';
+    pinBtn.textContent = 'PIN родителя — ещё немного';
+    pinBtn.onclick = function() {
+      if (!familyPinOk('PIN родителя для продления')) { toast('Неверный PIN'); return; }
+      var add = prompt('Добавить минут на сегодня (15–120)', '30');
+      if (add == null) return;
+      add = parseInt(add, 10) || 0;
+      if (add < 5) add = 15;
+      if (add > 180) add = 180;
+      var st2 = screenTimeLoad(pr.id);
+      st2.usedSec = Math.max(0, (st2.usedSec || 0) - add * 60);
+      screenTimeSave(pr.id, st2);
+      state._screenTimeLocked = false;
+      gate.remove();
+      toast('Добавлено ' + add + ' мин');
+    };
+    var exitBtn = document.createElement('button');
+    exitBtn.type = 'button';
+    exitBtn.className = 'btn';
+    exitBtn.style.cssText = 'width:100%;margin-top:8px';
+    exitBtn.textContent = 'Выйти в взрослый профиль';
+    exitBtn.onclick = function() {
+      var d = familyLoad();
+      var main = d.profiles.find(function(x){ return !x.kids; }) || d.profiles[0];
+      state._screenTimeLocked = false;
+      gate.remove();
+      profileSwitch(main.id);
+    };
+    card.appendChild(pinBtn);
+    card.appendChild(exitBtn);
+    gate.appendChild(card);
+    document.body.appendChild(gate);
+  }
+  function collectionStorageKey() {
+    return 'sl_collection_v1_' + (profileActive().id || 'main');
+  }
+
+  function familyDataKey(kind) {
+    var id = (profileActive() && profileActive().id) || 'main';
+    return 'sl_famdata_v1:' + id + ':' + kind;
+  }
+  function familyDataGet(kind, fallback) {
+    try {
+      var j = JSON.parse(localStorage.getItem(familyDataKey(kind)) || 'null');
+      return j == null ? fallback : j;
+    } catch (e) { return fallback; }
+  }
+  function familyDataSet(kind, val) {
+    try { localStorage.setItem(familyDataKey(kind), JSON.stringify(val)); } catch (e) {}
+  }
+  function familyShouldAskWho() {
+    try {
+      if (sessionStorage.getItem('sl_who_ok') === '1') return false;
+    } catch (e) {}
+    var d = familyLoad();
+    return d.profiles && d.profiles.length > 1;
+  }
+  function screenWhoWatching(root) {
+    shell(root, 'Кто смотрит?', function(c) {
+      c.appendChild(el('p', { style: 'text-align:center;color:var(--muted);margin:0 0 18px' },
+        'Выберите семейный профиль. У каждого — своя коллекция и ограничения.'));
+      var grid = el('div', { style: 'display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;max-width:420px;margin:0 auto' });
+      var d = familyLoad();
+      d.profiles.forEach(function(pr) {
+        var card = el('button', { type: 'button', style: 'border:0;background:transparent;color:inherit;cursor:pointer;text-align:center;padding:8px' });
+        var av = el('div', { style:
+          'width:88px;height:88px;border-radius:16px;margin:0 auto 10px;display:flex;align-items:center;justify-content:center;' +
+          'font-size:40px;background:linear-gradient(145deg,' + (pr.color || '#7c4dff') + '33,#00000044);' +
+          'box-shadow:0 10px 24px rgba(0,0,0,.25);border:2px solid ' + (pr.color || '#7c4dff')
+        });
+        av.textContent = pr.avatar || (pr.kids ? '🧒' : '👤');
+        card.appendChild(av);
+        card.appendChild(el('div', { style: 'font-weight:700' }, pr.name));
+        card.appendChild(el('div', { style: 'font-size:12px;opacity:.65;margin-top:4px' }, pr.kids ? 'Детский' : 'Взрослый'));
+        card.onclick = function() {
+          // kids can switch in freely; leaving kids needs pin — handled in profileSwitch
+          var data = familyLoad();
+          data.activeId = pr.id;
+          familySave(data);
+          try { sessionStorage.setItem('sl_who_ok', '1'); } catch (e) {}
+          try {
+            if (pr.kids) document.documentElement.setAttribute('data-kids', '1');
+            else document.documentElement.removeAttribute('data-kids');
+          } catch (e) {}
+          toast((pr.avatar || '') + ' ' + pr.name);
+          go(pr.kids ? 'kids' : 'home');
+        };
+        grid.appendChild(card);
+      });
+      c.appendChild(grid);
+      var manage = el('button', { type: 'button', class: 'btn', style: 'width:100%;max-width:420px;margin:20px auto 0;display:block' }, 'Управление семьёй');
+      manage.onclick = function() { go('profiles'); };
+      c.appendChild(manage);
+    }, { back: null });
+  }
+
+
+  function renderFamilySwitcher(container) {
+    var d = familyLoad();
+    var wrap = el('div', { class: 'glass-panel', style: 'padding:10px 12px;margin-bottom:12px' });
+    wrap.appendChild(el('div', { style: 'font-size:11px;opacity:.65;margin-bottom:8px;letter-spacing:.04em' }, 'СЕМЕЙНЫЙ ПРОФИЛЬ'));
+    var bar = el('div', { style: 'display:flex;gap:8px;overflow:x:auto;align-items:center;padding-bottom:2px' });
+    d.profiles.forEach(function(pr) {
+      var b = el('button', { type: 'button', class: 'chip' + (pr.id === d.activeId ? ' on' : '') });
+      b.innerHTML = '<span style="font-size:16px">' + (pr.avatar || '👤') + '</span> ' + pr.name;
+      b.style.borderColor = pr.id === d.activeId ? (pr.color || 'var(--violet)') : '';
+      b.onclick = function() { profileSwitch(pr.id); };
+      bar.appendChild(b);
+    });
+    var manage = el('button', { type: 'button', class: 'chip' }, 'Управлять');
+    manage.onclick = function() { go('profiles'); };
+    bar.appendChild(manage);
+    wrap.appendChild(bar);
+    container.appendChild(wrap);
   }
 
   function screenProfiles(root) {
-    shell(root, 'Семейные профили', function(c) {
-      var d = profilesLoad();
-      c.appendChild(el('p', { style: 'color:var(--muted);font-size:13px' },
-        'Родитель задаёт PIN и блокирует категории, слова, каналы. Детский профиль — Streamy Kids.'));
+    shell(root, 'Семья', function(c) {
+      var d = familyLoad();
+      c.appendChild(el('p', { style: 'color:var(--muted);font-size:13px;margin:0 0 12px' },
+        'Продакшен-режим семьи: «Кто смотрит?», изолированные коллекции, PIN, детский профиль, ограничения контента.'));
 
-      d.list.forEach(function(p) {
-        var row = el('div', { class: 'row', style: 'flex-direction:column;align-items:stretch' });
-        var top = el('div', { style: 'display:flex;justify-content:space-between;gap:8px;width:100%' });
-        var tx = el('div', { class: 'tx' });
-        tx.appendChild(el('b', null, (p.avatar || '👤') + ' ' + p.name));
-        var sub = (p.kids ? 'Streamy Kids' : 'Обычный') + (p.id === d.activeId ? ' · сейчас' : '');
-        var b = p.blocks || {};
-        var nBlock = (b.keywords||[]).length + (b.categories||[]).length + (b.channelSlugs||[]).length;
-        if (nBlock) sub += ' · блоков: ' + nBlock;
-        tx.appendChild(el('small', null, sub));
-        var actions = el('div', { style: 'display:flex;gap:6px;flex-shrink:0' });
-        var useBtn = el('button', { type: 'button', class: 'chip' }, p.id === d.activeId ? '✓' : 'Выбрать');
-        useBtn.onclick = function(ev) { ev.stopPropagation(); profileSwitch(p.id); };
-        var editBtn = el('button', { type: 'button', class: 'chip' }, 'Ограничения');
-        editBtn.onclick = function(ev) {
-          ev.stopPropagation();
-          if (!profileRequirePinOrSet()) return;
-          go('profileBlocks', { id: p.id });
+      d.profiles.forEach(function(pr) {
+        var card = el('div', { class: 'glass-panel', style: 'padding:14px;margin-bottom:10px;border-left:4px solid ' + (pr.color||'#7c4dff') });
+        var head = el('div', { style: 'display:flex;justify-content:space-between;align-items:center;gap:8px' });
+        var title = el('div', null, '');
+        title.innerHTML = '<b style="font-size:16px">' + (pr.avatar||'') + ' ' + pr.name + '</b>' +
+          '<div style="font-size:12px;opacity:.7">' + (pr.kids ? 'Детский' : 'Взрослый') +
+          (pr.id === d.activeId ? ' · активен' : '') + '</div>';
+        head.appendChild(title);
+        card.appendChild(head);
+        var actions = el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:10px' });
+        var useBtn = el('button', { type: 'button', class: 'btn', style: 'flex:1' }, pr.id === d.activeId ? 'Активен' : 'Переключить');
+        useBtn.onclick = function() { profileSwitch(pr.id); };
+        var edit = el('button', { type: 'button', class: 'chip' }, 'Ограничения');
+        var timeBtn = el('button', { type: 'button', class: 'chip' }, 'Время');
+        timeBtn.onclick = function() {
+          if (!familyEnsurePin()) return;
+          var data = familyLoad();
+          var t2 = data.profiles.find(function(x){ return x.id === pr.id; });
+          if (!t2) return;
+          if (!t2.kids) { toast('Лимит времени — для детского профиля'); return; }
+          var cur = screenTimeLimitMin(t2) || 60;
+          var v = prompt('Лимит минут в день (0 = без лимита)\nНапр. 60, 120, 180', String(cur));
+          if (v == null) return;
+          v = parseInt(v, 10);
+          if (isNaN(v) || v < 0) v = 0;
+          if (v > 12 * 60) v = 12 * 60;
+          t2.screenLimitMin = v;
+          if (!t2.blocks) t2.blocks = {};
+          t2.blocks.screenLimitMin = v;
+          familySave(data);
+          toast(v ? ('Лимит: ' + v + ' мин/день') : 'Лимит снят');
+          go('profiles');
         };
-        actions.append(useBtn, editBtn);
-        top.append(tx, actions);
-        row.appendChild(top);
-        c.appendChild(row);
+
+        edit.onclick = function() {
+          if (!familyEnsurePin()) return;
+          go('profileBlocks', { id: pr.id });
+        };
+        var ren = el('button', { type: 'button', class: 'chip' }, 'Имя');
+        ren.onclick = function() {
+          var n = prompt('Имя профиля', pr.name);
+          if (!n || !String(n).trim()) return;
+          var data = familyLoad();
+          var t2 = data.profiles.find(function(x){ return x.id === pr.id; });
+          if (t2) { t2.name = String(n).trim(); familySave(data); go('profiles'); }
+        };
+        var del = el('button', { type: 'button', class: 'chip' }, 'Удалить');
+        del.onclick = function() {
+          if (pr.id === 'main') { toast('Основной нельзя удалить'); return; }
+          if (d.profiles.length <= 1) return;
+          if (d.pin && !familyPinOk('PIN')) return;
+          if (!confirm('Удалить профиль?')) return;
+          var data = familyLoad();
+          data.profiles = data.profiles.filter(function(x){ return x.id !== pr.id; });
+          if (data.activeId === pr.id) data.activeId = data.profiles[0].id;
+          familySave(data);
+          go('profiles');
+        };
+        actions.append(useBtn, edit, timeBtn, ren, del);
+        card.appendChild(actions);
+        c.appendChild(card);
       });
 
-      var add = el('button', { type: 'button', class: 'btn', style: 'margin-top:12px;width:100%' }, '+ Профиль');
+      var add = el('button', { type: 'button', class: 'btn', style: 'width:100%;margin-top:8px' }, '+ Новый профиль');
       add.onclick = function() {
-        if (!profileRequirePinOrSet()) return;
-        var name = prompt('Имя профиля', 'Профиль');
+        var data = familyLoad();
+        if (data.pin && !familyPinOk('PIN семьи')) return;
+        var name = prompt('Имя', 'Профиль ' + (data.profiles.length + 1));
         if (!name) return;
-        var kids = confirm('Детский профиль (Streamy Kids)?');
-        d = profilesLoad();
-        d.list.push({
+        var kids = confirm('Детский профиль?');
+        data.profiles.push({
           id: 'p' + Date.now(),
-          name: name.trim(),
+          name: String(name).trim(),
           avatar: kids ? '🧒' : '👤',
           kids: !!kids,
-          blocks: { categories: kids ? ['18+', '16+', 'эрот'] : [], keywords: kids ? ['18+', 'эротика'] : [], channelSlugs: [], videoSlugs: [], maxAge: kids ? 12 : 0 }
+          color: kids ? '#f59e0b' : '#' + Math.floor(Math.random()*0xffffff).toString(16).padStart(6,'0'),
+          blocks: { categories: kids?['18+','16+']:[], keywords: kids?['18+']:[], channelSlugs: [], videoSlugs: [], maxAge: kids?12:0 },
+          data: { continueWatch: [], collection: { channels: [], videos: [] }, settings: {} }
         });
-        profilesSave(d);
+        familySave(data);
         go('profiles');
       };
       c.appendChild(add);
 
-      var pinBtn = el('button', { type: 'button', class: 'row', style: 'margin-top:8px' });
-      pinBtn.innerHTML = '<div class="tx"><b>PIN родителя</b><small>' + (d.parentPin ? 'установлен · сменить' : 'не задан · задать') + '</small></div>';
-      pinBtn.onclick = function() {
-        d = profilesLoad();
-        if (d.parentPin && !profileAskPin('Текущий PIN')) { toast('Неверный PIN'); return; }
-        var n = prompt('Новый PIN (4+ символа, пусто = сбросить)', '');
+      var pinRow = el('button', { type: 'button', class: 'row', style: 'margin-top:12px' });
+      pinRow.innerHTML = '<div class="tx"><b>PIN семьи</b><small>' + (d.pin ? 'установлен' : 'не задан') + '</small></div>';
+      pinRow.onclick = function() {
+        var data = familyLoad();
+        if (data.pin && !familyPinOk('Текущий PIN')) return;
+        var n = prompt('Новый PIN (4+, пусто = сброс)', '');
         if (n === null) return;
-        d.parentPin = (n || '').trim();
-        profilesSave(d);
-        toast(d.parentPin ? 'PIN сохранён' : 'PIN сброшен');
+        n = String(n).trim();
+        if (n && n.length < 4) { toast('Минимум 4'); return; }
+        data.pin = n;
+        familySave(data);
+        toast(n ? 'PIN сохранён' : 'PIN сброшен');
         go('profiles');
       };
-      c.appendChild(pinBtn);
-
-      if (profileIsKids()) {
-        var exit = el('button', { type: 'button', class: 'btn', style: 'margin-top:16px;width:100%;background:#7f1d1d' }, 'Выйти из Streamy Kids');
-        exit.onclick = function() {
-          d = profilesLoad();
-          var main = d.list.find(function(p) { return !p.kids; }) || d.list[0];
-          profileSwitch(main.id);
-        };
-        c.appendChild(exit);
-      }
-    }, { back: function() { go('home'); } });
+      c.appendChild(pinRow);
+    }, { back: function(){ go('home'); } });
   }
 
   function screenProfileBlocks(root) {
     var pid = String((state.route.params && state.route.params.id) || '');
     shell(root, 'Ограничения', function(c) {
-      var d = profilesLoad();
-      var p = d.list.find(function(x) { return x.id === pid; });
-      if (!p) {
-        c.appendChild(el('div', { class: 'empty' }, 'Профиль не найден'));
-        return;
-      }
-      if (!p.blocks) p.blocks = { categories: [], keywords: [], channelSlugs: [], videoSlugs: [], maxAge: 0 };
-
-      c.appendChild(el('p', { style: 'color:var(--muted);font-size:13px' },
-        'Профиль: ' + p.name + '. Заблокированный контент не показывается в этом профиле.'));
-
-      function section(title, key, placeholder) {
-        c.appendChild(el('div', { class: 'shelf-head', style: 'margin-top:12px' }, '<b>' + title + '</b><span></span>'));
-        var list = el('div', { class: 'list' });
+      var d = familyLoad();
+      var pr = d.profiles.find(function(x){ return String(x.id) === pid; });
+      if (!pr) { c.appendChild(el('div',{class:'empty'},'Не найден')); return; }
+      if (!pr.blocks) pr.blocks = { categories:[], keywords:[], channelSlugs:[], videoSlugs:[], maxAge:0 };
+      function sec(title, key, ph) {
+        c.appendChild(el('div', { class:'shelf-head', style:'margin-top:12px' }, '<b>'+title+'</b><span></span>'));
+        var list = el('div', { class:'list' });
         function redraw() {
           list.innerHTML = '';
-          var arr = p.blocks[key] || [];
-          if (!arr.length) list.appendChild(el('div', { class: 'empty' }, 'Пусто'));
-          arr.forEach(function(val, idx) {
-            var row = el('div', { class: 'row', style: 'justify-content:space-between' });
+          (pr.blocks[key]||[]).forEach(function(val, idx) {
+            var row = el('div', { class:'row', style:'justify-content:space-between' });
             row.appendChild(el('span', null, String(val)));
-            var del = el('button', { type: 'button', class: 'chip' }, '✕');
-            del.onclick = function() {
-              if (!profileRequirePinOrSet()) return;
-              p.blocks[key].splice(idx, 1);
-              profilesSave(d);
-              redraw();
-            };
+            var del = el('button', { type:'button', class:'chip' }, '✕');
+            del.onclick = function(){ if(!familyPinOk('PIN'))return; pr.blocks[key].splice(idx,1); familySave(d); redraw(); };
             row.appendChild(del);
             list.appendChild(row);
           });
+          if (!(pr.blocks[key]||[]).length) list.appendChild(el('div',{class:'empty'},'Пусто'));
         }
         redraw();
         c.appendChild(list);
-        var add = el('button', { type: 'button', class: 'btn', style: 'width:100%;margin-top:6px' }, '+ Добавить');
-        add.onclick = function() {
-          if (!profileRequirePinOrSet()) return;
-          var v = prompt(placeholder, '');
-          if (!v || !String(v).trim()) return;
-          p.blocks[key] = p.blocks[key] || [];
-          p.blocks[key].push(String(v).trim());
-          profilesSave(d);
-          redraw();
-          toast('Добавлено');
-        };
-        c.appendChild(add);
+        var addB = el('button', { type:'button', class:'btn', style:'width:100%;margin-top:6px' }, '+');
+        addB.onclick = function(){ if(!familyPinOk('PIN'))return; var v=prompt(ph,''); if(!v)return; pr.blocks[key]=pr.blocks[key]||[]; pr.blocks[key].push(String(v).trim()); familySave(d); redraw(); };
+        c.appendChild(addB);
       }
-
-      section('Запрещённые слова', 'keywords', 'Например: эротика, 18+');
-      section('Запрещённые категории', 'categories', 'Например: 18+, ужасы, news');
-      section('Запрещённые каналы (slug)', 'channelSlugs', 'slug канала с сайта');
-      section('Запрещённые видео (slug)', 'videoSlugs', 'slug видео');
-
-      c.appendChild(el('div', { class: 'shelf-head', style: 'margin-top:16px' }, '<b>Макс. возрастной рейтинг</b><span>0 = выкл</span>'));
-      var ages = [0, 6, 12, 16, 18];
-      var ageRow = el('div', { class: 'chip-row', style: 'display:flex;flex-wrap:wrap;gap:8px' });
-      ages.forEach(function(a) {
-        var lab = a === 0 ? 'Выкл' : (a + '+');
-        var b = el('button', { type: 'button', class: 'chip' + ((p.blocks.maxAge || 0) === a ? ' on' : '') }, lab);
-        b.onclick = function() {
-          if (!profileRequirePinOrSet()) return;
-          p.blocks.maxAge = a;
-          profilesSave(d);
-          toast('Макс. возраст: ' + lab);
-          go('profileBlocks', { id: pid });
-        };
-        ageRow.appendChild(b);
-      });
-      c.appendChild(ageRow);
-
-      var presets = el('button', { type: 'button', class: 'row', style: 'margin-top:16px' });
-      presets.innerHTML = '<div class="tx"><b>Пресет «Только детям»</b><small>слова 18+/16+, max 12+</small></div>';
-      presets.onclick = function() {
-        if (!profileRequirePinOrSet()) return;
-        p.blocks.keywords = Array.from(new Set([].concat(p.blocks.keywords || [], ['18+', '16+', 'эротика', 'adult', 'xxx'])));
-        p.blocks.categories = Array.from(new Set([].concat(p.blocks.categories || [], ['18+', '16+', 'adult'])));
-        p.blocks.maxAge = 12;
-        p.kids = true;
-        profilesSave(d);
-        toast('Пресет применён');
-        go('profileBlocks', { id: pid });
-      };
-      c.appendChild(presets);
-    }, { back: function() { go('profiles'); } });
+      sec('Слова','keywords','18+');
+      sec('Категории','categories','ужасы');
+      sec('Каналы','channelSlugs','slug');
+    }, { back: function(){ go('profiles'); } });
   }
 
   function screenKidsHome(root) {
-    document.documentElement.setAttribute('data-kids', '1');
+    document.documentElement.setAttribute('data-kids','1');
     shell(root, 'Streamy Kids', async function(c) {
-      c.appendChild(el('p', { style: 'font-size:15px;margin:0 0 12px' }, 'Безопасный режим · действуют ограничения родителя'));
-      var leave = el('button', { type: 'button', class: 'chip' }, 'Выход (PIN)');
-      leave.onclick = function() {
-        var d = profilesLoad();
-        var main = d.list.find(function(p) { return !p.kids; }) || d.list[0];
-        profileSwitch(main.id);
-      };
+      renderFamilySwitcher(c);
+      var leave = el('button', { type:'button', class:'chip' }, 'Выход из Kids');
+      leave.onclick = function(){ var d=familyLoad(); var main=d.profiles.find(function(p){return !p.kids;})||d.profiles[0]; profileSwitch(main.id); };
       c.appendChild(leave);
-
       try {
-        var cr = await api('GET', '/api/native_home.php', { query: { type: 'channels', limit: '40' } });
-        var channels = filterKidsContent((cr && (cr.channels || cr.data)) || [], 'channel');
-        c.appendChild(el('div', { class: 'shelf-head' }, '<b>Каналы</b><span></span>'));
-        if (!channels.length) {
-          c.appendChild(el('div', { class: 'empty' }, 'Нет доступных каналов для этого профиля'));
-        } else if (typeof renderChannelCards === 'function') {
-          renderChannelCards(c, channels);
-        } else {
-          channels.forEach(function(ch) {
-            var row = el('button', { type: 'button', class: 'row' });
-            row.appendChild(el('div', { class: 'tx' }));
-            row.querySelector('.tx').appendChild(el('b', null, ch.title || ch.name || 'Канал'));
-            row.onclick = function() { go('channel', { slug: ch.slug || ch.id }); };
-            c.appendChild(row);
-          });
+        var cr = await api('GET','/api/native_home.php',{ query:{ type:'channels', limit:'40' }});
+        var channels = filterKidsContent((cr&&(cr.channels||cr.data))||[],'channel');
+        if (!channels.length) c.appendChild(el('div',{class:'empty'},'Нет каналов'));
+        else channels.forEach(function(ch){
+          var row = el('button',{type:'button',class:'row'});
+          var tx=el('div',{class:'tx'}); tx.appendChild(el('b',null,ch.title||ch.name||'Канал'));
+          row.appendChild(tx);
+          row.onclick=function(){ go('channel',{ slug: ch.slug||ch.id }); };
+          c.appendChild(row);
+        });
+      } catch(e){ c.appendChild(el('div',{class:'empty'},e.message||'Ошибка')); }
+    }, { back:function(){ document.documentElement.removeAttribute('data-kids'); go('home'); }});
+  }
+
+  /* ----- Виртуальный паспорт Мира (только в браузере) ----- */
+  function passportLoad() {
+    try { return JSON.parse(localStorage.getItem('sl_world_passport_v1') || 'null') || null; } catch(e){ return null; }
+  }
+  function passportSave(doc) {
+    try { localStorage.setItem('sl_world_passport_v1', JSON.stringify(doc)); } catch(e){ toast('Не сохранилось'); }
+  }
+  function passportPayload(doc) {
+    return JSON.stringify({
+      v: 1,
+      type: 'streamlive-world-passport',
+      id: doc.id,
+      name: doc.name,
+      surname: doc.surname,
+      birth: doc.birth,
+      country: doc.country,
+      city: doc.city,
+      number: doc.number,
+      issued: doc.issued,
+      note: doc.note || ''
+    });
+  }
+  function loadQrLib() {
+    return new Promise(function(resolve, reject) {
+      if (window.QRCode) return resolve();
+      var s = document.createElement('script');
+      s.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+      s.onload = function(){ resolve(); };
+      s.onerror = function(){ reject(new Error('QR lib')); };
+      document.head.appendChild(s);
+    });
+  }
+  function screenPassport(root) {
+    shell(root, 'Паспорт Мира', function(c) {
+      var doc = passportLoad();
+      c.appendChild(el('p', { style: 'color:var(--muted);font-size:12px;margin:0 0 12px' },
+        'Виртуальный паспорт StreamLive · только в этом браузере · QR для переноса'));
+
+      if (!doc) {
+        c.appendChild(el('div', { class: 'empty' }, 'Паспорт ещё не создан'));
+      } else {
+        // Реалистичная обложка/разворот
+        var book = el('div', { style: 'perspective:1200px;margin:0 auto 14px;max-width:360px' });
+        var page = el('div', { class: 'sl-passport-page' });
+        page.style.cssText = [
+          'background:linear-gradient(145deg,#3b0a1a 0%,#5c0f2a 40%,#2a0612 100%)',
+          'border-radius:14px',
+          'padding:18px 16px 14px',
+          'color:#f3e7c5',
+          'box-shadow:0 18px 40px rgba(0,0,0,.45), inset 0 0 0 2px rgba(212,175,55,.35)',
+          'position:relative',
+          'overflow:hidden',
+          'font-family:Georgia,"Times New Roman",serif'
+        ].join(';');
+        // world stamp watermark
+        page.innerHTML =
+          '<div style="position:absolute;right:12px;top:12px;width:72px;height:72px;border:2px solid rgba(212,175,55,.55);border-radius:50%;display:flex;align-items:center;justify-content:center;transform:rotate(-18deg);opacity:.85">' +
+            '<div style="text-align:center;line-height:1.05;font-size:10px;letter-spacing:.08em;color:#d4af37"><b style="font-size:13px;display:block">WORLD</b>STAMP<br>МИР</div>' +
+          '</div>' +
+          '<div style="font-size:11px;letter-spacing:.22em;opacity:.8;margin-bottom:6px">STREAMLIVE · PASSPORT OF THE WORLD</div>' +
+          '<div style="font-size:18px;font-weight:700;letter-spacing:.04em;color:#ffe9a8">ПАСПОРТ МИРА</div>' +
+          '<div style="display:flex;gap:12px;margin-top:14px;align-items:flex-start">' +
+            '<div style="width:86px;height:108px;border-radius:8px;background:linear-gradient(180deg,#6b7280,#374151);border:1px solid rgba(212,175,55,.4);display:flex;align-items:center;justify-content:center;font-size:34px;flex-shrink:0">' +
+              (doc.photo ? '' : '👤') +
+            '</div>' +
+            '<div style="flex:1;min-width:0;font-size:13px;line-height:1.45">' +
+              '<div><span style="opacity:.65;font-size:10px">ФАМИЛИЯ / SURNAME</span><br><b style="font-size:15px">' + (doc.surname || '—') + '</b></div>' +
+              '<div style="margin-top:6px"><span style="opacity:.65;font-size:10px">ИМЯ / GIVEN NAMES</span><br><b style="font-size:15px">' + (doc.name || '—') + '</b></div>' +
+              '<div style="margin-top:6px"><span style="opacity:.65;font-size:10px">ГРАЖДАНСТВО / COUNTRY</span><br>' + (doc.country || '—') + (doc.city ? (' · ' + doc.city) : '') + '</div>' +
+            '</div>' +
+          '</div>' +
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px;font-size:12px">' +
+            '<div><span style="opacity:.65;font-size:10px">ДАТА РОЖД.</span><br>' + (doc.birth || '—') + '</div>' +
+            '<div><span style="opacity:.65;font-size:10px">№ ДОКУМЕНТА</span><br>' + (doc.number || doc.id || '—') + '</div>' +
+            '<div><span style="opacity:.65;font-size:10px">ВЫДАН</span><br>' + (doc.issued || '—') + '</div>' +
+            '<div><span style="opacity:.65;font-size:10px">ID</span><br style="font-size:11px">' + (doc.id || '—') + '</div>' +
+          '</div>' +
+          '<div style="margin-top:12px;padding-top:8px;border-top:1px dashed rgba(212,175,55,.35);font-family:monospace;font-size:11px;letter-spacing:.06em;opacity:.85;word-break:break-all">' +
+            'P&lt;SLWLD' + String(doc.surname||'X').toUpperCase().replace(/[^A-Z]/g,'').slice(0,12) + '&lt;&lt;' + String(doc.name||'X').toUpperCase().replace(/[^A-Z]/g,'').slice(0,8) +
+          '</div>';
+        // photo if data url
+        if (doc.photo) {
+          setTimeout(function() {
+            var slot = page.querySelector('div[style*="width:86px"]');
+            if (slot) {
+              slot.innerHTML = '';
+              var im = document.createElement('img');
+              im.src = doc.photo;
+              im.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:8px';
+              slot.appendChild(im);
+            }
+          }, 0);
         }
-      } catch (e) {
-        c.appendChild(el('div', { class: 'empty' }, e.message || 'Ошибка'));
+        book.appendChild(page);
+        c.appendChild(book);
       }
 
-      try {
-        var vr = await api('GET', '/api/native_videos.php', { query: { action: 'list', limit: '40' } });
-        var vids = filterKidsContent((vr && (vr.videos || vr.data)) || [], 'video');
-        c.appendChild(el('div', { class: 'shelf-head', style: 'margin-top:16px' }, '<b>Видео</b><span></span>'));
-        if (!vids.length) {
-          c.appendChild(el('div', { class: 'empty' }, 'Нет доступных видео'));
-        } else {
-          vids.slice(0, 24).forEach(function(v) {
-            var row = el('button', { type: 'button', class: 'row' });
-            row.appendChild(el('div', { class: 'tx' }));
-            row.querySelector('.tx').appendChild(el('b', null, v.title || 'Видео'));
-            row.onclick = function() { go('video', { slug: v.slug || v.id }); };
-            c.appendChild(row);
-          });
-        }
-      } catch (e) {}
-    }, { back: function() {
-      document.documentElement.removeAttribute('data-kids');
-      go('home');
-    }});
+      var edit = el('button', { type: 'button', class: 'btn', style: 'width:100%' }, doc ? 'Изменить данные' : 'Создать паспорт');
+      edit.onclick = function() { go('passportEdit'); };
+      c.appendChild(edit);
+      if (doc) {
+        var qrBtn = el('button', { type: 'button', class: 'btn', style: 'width:100%;margin-top:8px' }, 'QR-код паспорта');
+        qrBtn.onclick = function() { go('passportQr'); };
+        c.appendChild(qrBtn);
+        var scan = el('button', { type: 'button', class: 'btn', style: 'width:100%;margin-top:8px' }, 'Сканировать QR камерой');
+        scan.onclick = function() { go('passportScan'); };
+        c.appendChild(scan);
+        var del = el('button', { type: 'button', class: 'chip', style: 'margin-top:12px' }, 'Удалить с устройства');
+        del.onclick = function() {
+          if (!confirm('Удалить паспорт с этого браузера?')) return;
+          localStorage.removeItem('sl_world_passport_v1');
+          toast('Удалено');
+          go('passport');
+        };
+        c.appendChild(del);
+      }
+    }, { back: function() { go('home'); } });
   }
+  function screenPassportEdit(root) {
+    shell(root, 'Данные паспорта', function(c) {
+      var doc = passportLoad() || {
+        id: 'WP-' + Date.now().toString(36).toUpperCase(),
+        name: '', surname: '', birth: '', country: '', city: '', number: '', note: '', photo: '',
+        issued: new Date().toISOString().slice(0, 10)
+      };
+      function field(label, key, type) {
+        c.appendChild(el('label', { style: 'display:block;font-size:12px;margin:10px 0 4px;opacity:.75' }, label));
+        var inp = el('input', {
+          type: type || 'text',
+          value: doc[key] || '',
+          style: 'width:100%;padding:12px;border-radius:12px;border:1px solid rgba(127,127,127,.25);background:rgba(0,0,0,.15);color:inherit;box-sizing:border-box'
+        });
+        inp.oninput = function() { doc[key] = inp.value; };
+        c.appendChild(inp);
+      }
+      field('Имя', 'name');
+      field('Фамилия', 'surname');
+      field('Дата рождения', 'birth', 'date');
+      field('Страна', 'country');
+      field('Город', 'city');
+      field('Номер документа', 'number');
+      field('Заметка', 'note');
+      c.appendChild(el('label', { style: 'display:block;font-size:12px;margin:10px 0 4px;opacity:.75' }, 'Фото (с устройства)'));
+      var file = el('input', { type: 'file', accept: 'image/*' });
+      file.onchange = function() {
+        if (!file.files || !file.files[0]) return;
+        var r = new FileReader();
+        r.onload = function() {
+          var data = String(r.result || '');
+          // compress via canvas
+          var img = new Image();
+          img.onload = function() {
+            var cv = document.createElement('canvas');
+            var w = 240, h = 300;
+            cv.width = w; cv.height = h;
+            var ctx = cv.getContext('2d');
+            ctx.drawImage(img, 0, 0, w, h);
+            doc.photo = cv.toDataURL('image/jpeg', 0.72);
+            toast('Фото добавлено');
+          };
+          img.src = data;
+        };
+        r.readAsDataURL(file.files[0]);
+      };
+      c.appendChild(file);
+      var save = el('button', { type: 'button', class: 'btn', style: 'width:100%;margin-top:16px' }, 'Сохранить');
+      save.onclick = function() {
+        if (!String(doc.name || '').trim()) { toast('Укажите имя'); return; }
+        doc.updated = Date.now();
+        if (!doc.id) doc.id = 'WP-' + Date.now().toString(36).toUpperCase();
+        if (!doc.issued) doc.issued = new Date().toISOString().slice(0, 10);
+        if (!doc.number) doc.number = doc.id;
+        passportSave(doc);
+        toast('Сохранено');
+        go('passport');
+      };
+      c.appendChild(save);
+    }, { back: function() { go('passport'); } });
+  }
+  function screenPassportQr(root) {
+    shell(root, 'QR паспорта', async function(c) {
+      var doc = passportLoad();
+      if (!doc) { c.appendChild(el('div', { class: 'empty' }, 'Сначала создайте паспорт')); return; }
+      var payload = passportPayload(doc);
+      var stamp = el('div', { style: 'text-align:center;margin-bottom:8px' });
+      stamp.innerHTML = '<div style="display:inline-flex;width:64px;height:64px;border:2px solid #d4af37;border-radius:50%;align-items:center;justify-content:center;color:#d4af37;font-size:11px;transform:rotate(-12deg)"><b>WORLD<br>STAMP</b></div>';
+      c.appendChild(stamp);
+      var box = el('div', { id: 'sl-passport-qr', style: 'display:flex;justify-content:center;padding:16px;background:#fff;border-radius:16px;margin:12px 0' });
+      c.appendChild(box);
+      try {
+        await loadQrLib();
+        box.innerHTML = '';
+        new QRCode(box, { text: payload, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.M });
+      } catch (e) {
+        box.innerHTML = '';
+        var img = el('img', { alt: 'QR', style: 'width:220px;height:220px' });
+        img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(payload);
+        box.appendChild(img);
+      }
+      var copy = el('button', { type: 'button', class: 'btn', style: 'width:100%' }, 'Копировать данные');
+      copy.onclick = function() {
+        try { navigator.clipboard.writeText(payload); toast('Скопировано'); } catch (e) { toast('Не удалось'); }
+      };
+      c.appendChild(copy);
+    }, { back: function() { go('passport'); } });
+  }
+  function screenPassportScan(root) {
+    shell(root, 'Скан QR', function(c) {
+      c.appendChild(el('p', { style: 'color:var(--muted);font-size:13px;margin:0 0 10px' },
+        'Наведите камеру на QR паспорта. Можно также загрузить фото или вставить JSON.'));
+      var video = el('video', { autoplay: true, playsinline: true, muted: true, style: 'width:100%;max-height:280px;border-radius:14px;background:#000;object-fit:cover' });
+      c.appendChild(video);
+      var status = el('p', { style: 'font-size:12px;color:var(--muted);margin:8px 0' }, 'Камера…');
+      c.appendChild(status);
+      var streamRef = null;
+      var timer = null;
+      var stopped = false;
+
+      function stopCam() {
+        stopped = true;
+        if (timer) { clearInterval(timer); timer = null; }
+        try {
+          if (streamRef) streamRef.getTracks().forEach(function(tr) { tr.stop(); });
+        } catch (e) {}
+        streamRef = null;
+      }
+
+      async function applyPayload(text) {
+        try {
+          var j = JSON.parse(String(text || '').trim());
+          if (!j || j.type !== 'streamlive-world-passport') throw new Error('Не формат паспорта StreamLive');
+          passportSave({
+            id: j.id || ('WP-' + Date.now().toString(36)),
+            name: j.name || '',
+            surname: j.surname || '',
+            birth: j.birth || '',
+            country: j.country || '',
+            city: j.city || '',
+            number: j.number || '',
+            issued: j.issued || new Date().toISOString().slice(0, 10),
+            note: j.note || '',
+            photo: j.photo || '',
+            updated: Date.now()
+          });
+          stopCam();
+          toast('Паспорт записан');
+          go('passport');
+        } catch (e) {
+          status.textContent = e.message || 'Неверный QR';
+        }
+      }
+
+      async function startCam() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          status.textContent = 'Камера недоступна в этом браузере';
+          return;
+        }
+        try {
+          streamRef = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }
+          });
+          video.srcObject = streamRef;
+          await video.play().catch(function(){});
+          status.textContent = 'Ищем QR…';
+          var det = null;
+          if ('BarcodeDetector' in window) {
+            try { det = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) {}
+          }
+          // jsQR fallback
+          if (!det && !window.jsQR) {
+            try {
+              await new Promise(function(resolve, reject) {
+                var s = document.createElement('script');
+                s.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js';
+                s.onload = resolve; s.onerror = reject;
+                document.head.appendChild(s);
+              });
+            } catch (e) {}
+          }
+          var cv = document.createElement('canvas');
+          var ctx = cv.getContext('2d', { willReadFrequently: true });
+          timer = setInterval(async function() {
+            if (stopped || !video.videoWidth) return;
+            cv.width = video.videoWidth;
+            cv.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0, cv.width, cv.height);
+            try {
+              if (det) {
+                var codes = await det.detect(cv);
+                if (codes && codes[0] && codes[0].rawValue) {
+                  status.textContent = 'QR найден';
+                  applyPayload(codes[0].rawValue);
+                  return;
+                }
+              } else if (window.jsQR) {
+                var img = ctx.getImageData(0, 0, cv.width, cv.height);
+                var code = window.jsQR(img.data, img.width, img.height);
+                if (code && code.data) {
+                  status.textContent = 'QR найден';
+                  applyPayload(code.data);
+                  return;
+                }
+              }
+            } catch (e) {}
+          }, 450);
+        } catch (e) {
+          status.textContent = 'Нет доступа к камере: ' + ((e && e.message) || 'ошибка');
+        }
+      }
+      startCam();
+
+      var ta = el('textarea', { placeholder: 'Или вставьте JSON с QR…', style: 'width:100%;min-height:80px;border-radius:12px;padding:12px;margin:10px 0;box-sizing:border-box' });
+      c.appendChild(ta);
+      var apply = el('button', { type: 'button', class: 'btn', style: 'width:100%' }, 'Применить текст');
+      apply.onclick = function() { applyPayload(ta.value); };
+      c.appendChild(apply);
+      var file = el('input', { type: 'file', accept: 'image/*', style: 'margin-top:12px' });
+      file.onchange = async function() {
+        if (!file.files || !file.files[0]) return;
+        try {
+          if ('BarcodeDetector' in window) {
+            var det2 = new BarcodeDetector({ formats: ['qr_code'] });
+            var bmp = await createImageBitmap(file.files[0]);
+            var codes = await det2.detect(bmp);
+            if (codes && codes[0]) { applyPayload(codes[0].rawValue); return; }
+          }
+          toast('Не удалось распознать с фото');
+        } catch (e) { toast('Ошибка распознавания'); }
+      };
+      c.appendChild(file);
+
+      // stop camera on leave via shell back is hard; hook once
+      var backObs = setInterval(function() {
+        if (!document.body.contains(video)) { stopCam(); clearInterval(backObs); }
+      }, 800);
+    }, { back: function() { go('passport'); } });
+  }
+
 
   
   
@@ -2896,11 +3766,224 @@ function getSetting(k, def) {
     } catch (e) {}
   }
 
+
+
+  /* ---------- Музыка: Jamendo API (CC-лицензии) ---------- */
+  var __musicAudio = null;
+  var __musicTrack = null;
+  var __musicList = [];
+  // client_id: свой с https://devportal.jamendo.com — можно задать в Настройках
+  // Публичный demo-ключ часто встречается в доках/примерах; если не сработает — вставь свой.
+  var JAMENDO_DEFAULT_CLIENT = 'b6747d04';
+
+  function jamendoClientId() {
+    var id = '';
+    try { id = getSetting('jamendo_client_id', '') || ''; } catch (e) {}
+    id = String(id || '').trim();
+    return id || JAMENDO_DEFAULT_CLIENT;
+  }
+
+  function musicQuotaLoad() {
+    var day = new Date().toISOString().slice(0, 10);
+    try {
+      var j = JSON.parse(localStorage.getItem('sl_music_quota_v1') || '{}');
+      if (j.day !== day) return { day: day, count: 0, blocked: [] };
+      return j;
+    } catch (e) { return { day: day, count: 0, blocked: [] }; }
+  }
+  function musicQuotaSave(q) {
+    try { localStorage.setItem('sl_music_quota_v1', JSON.stringify(q)); } catch (e) {}
+  }
+  function musicCanPlay() {
+    var q = musicQuotaLoad();
+    return (q.count || 0) < 15;
+  }
+  function musicIncPlay() {
+    var q = musicQuotaLoad();
+    q.count = (q.count || 0) + 1;
+    musicQuotaSave(q);
+    return q.count;
+  }
+  function musicIsBlocked(track) {
+    var q = musicQuotaLoad();
+    var id = String((track && (track.id || track.url)) || '');
+    if ((q.blocked || []).indexOf(id) >= 0) return true;
+    if (track && (track.blocked === true || track.rkn === true || track.dmca === true)) return true;
+    return false;
+  }
+  function musicBlockTrack(track, reason) {
+    var q = musicQuotaLoad();
+    q.blocked = q.blocked || [];
+    var id = String((track && (track.id || track.url)) || '');
+    if (id && q.blocked.indexOf(id) < 0) q.blocked.push(id);
+    musicQuotaSave(q);
+    try {
+      inboxPush({ type: 'system', title: 'Трек заблокирован', body: (track && track.title) || id, route: { name: 'music' } });
+    } catch (e) {}
+    toast('Трек недоступен' + (reason ? ': ' + reason : ''));
+  }
+
+  function jamendoMapTrack(tr) {
+    if (!tr) return null;
+    var url = tr.audio || tr.audiodownload || '';
+    if (!url) return null;
+    return {
+      id: 'jamendo-' + String(tr.id),
+      jamendo_id: tr.id,
+      title: tr.name || 'Track',
+      artist: tr.artist_name || tr.artist_id || 'Artist',
+      album: tr.album_name || '',
+      url: url,
+      image: tr.image || tr.album_image || '',
+      duration: tr.duration || 0,
+      license: tr.license_ccurl || tr.license || 'Jamendo CC',
+      genre: (tr.musicinfo && tr.musicinfo.tags && tr.musicinfo.tags.genres)
+        ? (tr.musicinfo.tags.genres[0] || '')
+        : '',
+      legal: true,
+      source: 'jamendo'
+    };
+  }
+
+  async function jamendoFetchTracks(opts) {
+    opts = opts || {};
+    var client = jamendoClientId();
+    var q = {
+      limit: String(opts.limit || 40),
+      order: opts.order || 'popularity_total',
+      q: opts.search || ''
+    };
+    // 1) PHP-прокси на нашем сервере (без CORS)
+    try {
+      var r = await softFetchJson(
+        ['/webapp/api/native_music.php', '/api/native_music.php'],
+        'GET',
+        q
+      );
+      if (r && r.ok && Array.isArray(r.tracks) && r.tracks.length) {
+        var out = r.tracks.filter(function(m) { return m && m.url && !musicIsBlocked(m); });
+        try { offlineCacheSet('music_catalog', out, 6 * 3600 * 1000); } catch (e) {}
+        return out;
+      }
+      if (r && r.error) throw new Error(r.error);
+    } catch (e1) {
+      // 2) прямой Jamendo (может резаться CORS/VPN)
+      try {
+        var params = new URLSearchParams();
+        params.set('client_id', client);
+        params.set('format', 'json');
+        params.set('limit', String(opts.limit || 40));
+        params.set('audioformat', 'mp32');
+        params.set('include', 'musicinfo');
+        if (opts.search) { params.set('namesearch', opts.search); params.set('order', 'relevance'); }
+        else params.set('order', opts.order || 'popularity_total');
+        var res = await fetch('https://api.jamendo.com/v3.0/tracks/?' + params.toString(), {
+          method: 'GET', mode: 'cors', credentials: 'omit'
+        });
+        if (!res.ok) throw new Error('Jamendo HTTP ' + res.status);
+        var data = await res.json();
+        var results = (data && data.results) || [];
+        var out2 = [];
+        results.forEach(function(tr) {
+          var m = jamendoMapTrack(tr);
+          if (m && !musicIsBlocked(m)) out2.push(m);
+        });
+        if (out2.length) {
+          try { offlineCacheSet('music_catalog', out2, 6 * 3600 * 1000); } catch (e) {}
+          return out2;
+        }
+      } catch (e2) {
+        throw new Error((e1 && e1.message) || (e2 && e2.message) || 'Failed to fetch');
+      }
+    }
+    var cached = (typeof offlineCacheGet === 'function') ? offlineCacheGet('music_catalog') : null;
+    if (cached && cached.length) return cached;
+    return [];
+  }
+
+  function musicStop() {
+    try {
+      if (__musicAudio) {
+        __musicAudio.pause();
+        __musicAudio.removeAttribute('src');
+        __musicAudio.load();
+      }
+    } catch (e) {}
+    __musicTrack = null;
+  }
+
+  function musicPlay(track) {
+    if (!track || !track.url) return;
+    if (musicIsBlocked(track)) {
+      toast('Трек заблокирован');
+      return;
+    }
+    if (!musicCanPlay()) {
+      toast('Дневной лимит 15 прослушиваний исчерпан');
+      return;
+    }
+    if (!__musicAudio) {
+      __musicAudio = new Audio();
+      __musicAudio.preload = 'none';
+      __musicAudio.crossOrigin = 'anonymous';
+      document.addEventListener('visibilitychange', function() {
+        if (document.hidden && __musicAudio && !__musicAudio.paused) {
+          __musicAudio.pause();
+          toast('Музыка на паузе (экран неактивен)');
+        }
+      });
+      window.addEventListener('pagehide', function() { musicStop(); });
+      __musicAudio.addEventListener('ended', function() {
+        // auto next
+        if (!__musicTrack || !__musicList.length) return;
+        var idx = -1;
+        for (var i = 0; i < __musicList.length; i++) {
+          if (String(__musicList[i].id) === String(__musicTrack.id)) { idx = i; break; }
+        }
+        if (idx >= 0 && idx + 1 < __musicList.length) musicPlay(__musicList[idx + 1]);
+      });
+    }
+    try { __musicAudio.pause(); } catch (e) {}
+    __musicTrack = track;
+    __musicAudio.src = track.url;
+    __musicAudio.play().then(function() {
+      var n = musicIncPlay();
+      toast('▶ ' + (track.title || 'Трек') + ' — ' + (track.artist || '') + ' · ' + n + '/15');
+    }).catch(function(err) {
+      toast('Не удалось запустить: ' + ((err && err.message) || 'ошибка'));
+    });
+  }
+
+  function screenMusic(root) { go("home"); }
+
+
+  /* ---------- Новости (RSS / native_news) ---------- */
+  async function fetchNews(limit) {
+    limit = limit || 30;
+    try {
+      var r = await softFetchJson(
+        ['/webapp/api/native_news.php', '/api/native_news.php'],
+        'GET',
+        { limit: String(limit) }
+      );
+      if (r && r.ok && Array.isArray(r.items) && r.items.length) return r.items;
+    } catch (e) {}
+    // fallback: публичные RSS через rss2json-like или статичный список
+    var feeds = [
+      'https://rss.nytimes.com/services/xml/rss/nyt/World.xml',
+      'https://feeds.bbci.co.uk/news/world/rss.xml'
+    ];
+    // без CORS часто не взлетит — native_news.php основной путь
+    return [];
+  }
+
+  function screenNews(root) { go("home"); }
+
 /* ---------- Super App: быстрый хаб ---------- */
   function screenHub(root) {
     shell(root, 'Super App', function(c) {
       c.appendChild(el('p', { style: 'color:var(--muted);font-size:13px;margin:0 0 12px' },
-        'Единая точка входа: эфир, видео, форум, чат, студия, kids, коллекция.'));
+        'Единая точка входа: эфир, видео, форум, чат, студия, kids, коллекция, паспорт.'));
       var items = [
         ['📡', 'Эфир', function() { state.tab = 0; go('home'); }],
         ['▶', 'Видео', function() { state.tab = 1; go('home'); }],
@@ -2917,6 +4000,7 @@ function getSetting(k, def) {
         ['⚙️', 'Настройки', function() { go('settings'); }],
         ['⌕', 'Поиск', function() { go('search'); }],
         ['📥', 'Инбокс', function() { go('inbox'); }],
+        ['🛂', 'Паспорт Мира', function() { go('passport'); }],
       ];
       var grid = el('div', { style: 'display:grid;grid-template-columns:repeat(3,1fr);gap:10px' });
       items.forEach(function(it) {
@@ -2935,6 +4019,9 @@ function getSetting(k, def) {
   }
 
 function go(name, params) {
+    if (state._screenTimeLocked && name !== 'who' && name !== 'profiles') return;
+    if (state._regionBlocked) return;
+    if (state._forceUpdate) return; // старая версия заблокирована
     var prev = state.route && state.route.name;
     // уходим с канала/видео — мини-плеер, если ещё играет
     if ((prev === 'channel' || prev === 'video') && name !== 'channel' && name !== 'video') {
@@ -2957,7 +4044,11 @@ function go(name, params) {
         return;
       }
     }
-    state.route = { name, params: params || {} };
+    if (name === 'home' && typeof familyShouldAskWho === 'function' && familyShouldAskWho()) {
+      name = 'who';
+      params = {};
+    }
+    state.route = { name: name, params: params || {} };
     render();
   }
 
@@ -3572,6 +4663,8 @@ function go(name, params) {
   }
 
   function renderChannelCards(box, list) {
+    list = filterPublicContent(Array.isArray(list) ? list : []);
+    if (profileIsKids()) list = filterKidsContent(list, 'channel');
     box.className = list && list.length ? 'grid' : 'empty';
     box.innerHTML = '';
     if (!list || !list.length) {
@@ -3649,6 +4742,7 @@ function go(name, params) {
       hero.querySelector('.hero-cta').onclick = () => { document.querySelector('.chip-row')?.scrollIntoView({behavior:'smooth',block:'start'}); };
       c.appendChild(hero);
 
+      try { renderFamilySwitcher(c); } catch(e) {}
       try { renderStoriesRail(c); } catch (e) {}
       // Continue watching: lightweight local history, no extra server polling.
       try {
@@ -4189,10 +5283,12 @@ function go(name, params) {
         addRow('👤', 'Аккаунт', u.username || '', () => toast(u.email || u.username || ''));
       }
       addRow('✨', 'Super App', 'Быстрые разделы', () => go('hub'));
+      addRow('🛂', 'Паспорт Мира', 'Виртуальный документ · QR', () => go('passport'));
       addRow('📥', 'Инбокс', 'Чаты, форум, система', () => go('inbox'));
       addRow('★', 'Моя коллекция', 'Избранные каналы и видео', () => go('collection'));
       addRow('🔎', 'Discover', 'Обзор контента', () => go('discover'));
       addRow('🎬', 'Студия', 'Статистика автора', () => go('studio'));
+      addRow('👥', 'Кто смотрит?', 'Сменить профиль', () => { try{sessionStorage.removeItem('sl_who_ok');}catch(e){} go('who'); });
       addRow('👨‍👩‍👧‍👦', 'Семейные профили', 'Несколько профилей и PIN', () => go('profiles'));
       addRow('🧒', 'Streamy Kids', 'Детский режим', () => {
         var d = profilesLoad();
@@ -4722,6 +5818,7 @@ function go(name, params) {
   }
 
   function renderForumThreads(box, threads) {
+    threads = filterPublicContent(Array.isArray(threads) ? threads : []);
     box.className = threads && threads.length ? 'list' : 'empty';
     box.innerHTML = '';
     if (!threads || !threads.length) box.innerHTML = '<b>Нет тем</b>Создай первую';
@@ -5211,6 +6308,14 @@ function go(name, params) {
         c.appendChild(b);
       });
 
+      try {
+        var geo = '';
+        try { geo = localStorage.getItem('sl_geo_country') || ''; } catch(e) {}
+        c.appendChild(el('p', { class: 'set-sec' }, 'Регион'));
+        var geoRow = el('div', { class: 'row' });
+        geoRow.innerHTML = '<div class="tx"><b>Доступ РФ + СНГ</b><small>' + (geo ? ('Определён: ' + geo) : 'проверка при входе') + '</small></div>';
+        c.appendChild(geoRow);
+      } catch(e) {}
       c.appendChild(el('p', { class: 'set-sec' }, 'Уведомления и чат'));
       const pollBox = el('div', { class: 'list' });
       [[5, '5 мин'], [15, '15 мин'], [30, '30 мин'], [60, '60 мин']].forEach(([m, lab]) => {
@@ -5247,7 +6352,7 @@ function go(name, params) {
         ['auto', 'Авто — каскад рабочих'],
         ['hlsjs', 'HLS.js'],
         ['shaka', 'Shaka Player'],
-        ['videojs', 'Video.js'],
+        ['videojs', 'Video.js 8'],
         ['artplayer', 'ArtPlayer'],
         ['clappr', 'Clappr'],
         ['dashjs', 'dash.js'],
@@ -5260,6 +6365,8 @@ function go(name, params) {
         ['pegasus', 'Plyr + HLS'],
         ['vidstack', 'Vidstack'],
         ['xgplayer', 'XGPlayer'],
+        ['mpegts', 'mpegts.js (FLV/TS)'],
+        ['hls_modern', 'HLS.js modern'],
         ['ckplayer', 'CKPlayer-style'],
         ['tcplayer', 'TCPlayer-light'],
         ['flowplayer', 'Flowplayer 7'],
@@ -5501,6 +6608,11 @@ function go(name, params) {
     if (n === 'studio') return screenStudio(root);
     if (n === 'epg') return screenEpg(root);
     if (n === 'profiles') return screenProfiles(root);
+    if (n === 'who') return screenWhoWatching(root);
+    if (n === 'passportScan') return screenPassportScan(root);
+    if (n === 'passportQr') return screenPassportQr(root);
+    if (n === 'passportEdit') return screenPassportEdit(root);
+    if (n === 'passport') return screenPassport(root);
     if (n === 'profileBlocks') return screenProfileBlocks(root);
     if (n === 'kids') return screenKidsHome(root);
     if (n === 'game') return screenGame(root);
@@ -5517,7 +6629,7 @@ function go(name, params) {
   async function registerAppWorker() {
     if (!('serviceWorker' in navigator)) return;
     try {
-      const reg = await navigator.serviceWorker.register('/webapp/sw.js?v=1475', { scope: '/webapp/' });
+      const reg = await navigator.serviceWorker.register('/webapp/sw.js?v=1491', { scope: '/webapp/' });
       reg.addEventListener('updatefound', () => {
         const worker = reg.installing;
         if (!worker) return;
@@ -5547,6 +6659,11 @@ function go(name, params) {
       const remoteBuild = Number(info.build) || 0;
       const remoteVer = String(info.version || '');
       const localBuild = Number(state.build) || Number(window.SL_BUILD) || 0;
+      // сервер может запретить старые клиенты
+      if (isBuildBlocked(localBuild, info)) {
+        showForceUpdateGate(info);
+        return;
+      }
       if (remoteBuild > localBuild) {
         showUpdateBanner(remoteVer || 'новая версия', remoteBuild);
       }
@@ -5559,6 +6676,12 @@ function go(name, params) {
     scheduleNotifWorker(false);
     setTimeout(showNotifBanner, 2500);
     scheduleWheelBanner();
-    go('splash');
+    runRegionGate().then(function(ok) {
+      if (ok) go('splash');
+      else {
+        // если вдруг заблокировали — экран уже показан; иначе всё равно splash
+        try { if (!document.getElementById('sl-region-gate')) go('splash'); } catch (e) { go('splash'); }
+      }
+    }).catch(function() { go('splash'); });
   });
 })();
