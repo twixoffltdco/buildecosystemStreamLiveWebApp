@@ -1,0 +1,20 @@
+Если webapp не работает после входа / 403 / 503:
+
+Причина: на сайте включена «Проверка браузера» (anti-bot).
+Она отдаёт HTML вместо JSON на /api/* — webapp ломается.
+
+ЧТО СДЕЛАТЬ:
+1) В файле защиты (часто includes/ или auto_prepend) добавь В НАЧАЛЕ:
+
+$uri = $_SERVER['REQUEST_URI'] ?? '';
+if (strpos($uri, '/webapp/api/') !== false || strpos($uri, '/api/native_') !== false) {
+  // не запускать proof-of-work / browser check
+  return; // или skip дальше по логике твоего файла
+}
+
+2) Либо временно отключи anti-bot для теста.
+
+3) API лежит и в /api/ и в /webapp/api/ — webapp бьёт в /webapp/api/
+
+WebApp после входа НЕ ломает основной сайт.
+Гео «только СНГ» — это отдельная настройка твоего PHP, не webapp.
